@@ -1,0 +1,109 @@
+name: Validate SQL
+ 
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+    paths:
+      - '01_ddl/**'
+      - '02_dml/**'
+      - '03_dcl/**'
+      - '04_tcl/**'
+      - '05_rollbacks/**'
+      - '**.sql'
+      - '**.yaml'
+ 
+jobs:
+  lint-sql:
+    name: Lint SQL (sqlfluff)
+    runs-on: ubuntu-latest
+ 
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+ 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+ 
+      - name: Install sqlfluff
+        run: pip install sqlfluff
+ 
+      - name: Run SQL linter
+        run: |
+          sqlfluff lint \
+            --dialect postgres \
+            --templater raw \
+            01_ddl/ 02_dml/ 03_dcl/ 04_tcl/ 05_rollbacks/ \
+            || true  # Change to exit 1 to make failures blocking
+ 
+  syntax-check:
+    name: PostgreSQL syntax check
+    runs-on: ubuntu-latest
+ 
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ci_db
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: ci_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+ 
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+ 
+      - name: Detect changed SQL files in PR
+        id: changed-files
+        uses: tj-actions/changed-files@v44
+        with:
+          files: |
+            01_ddl/**
+            02_dml/**
+            03_dcl/**
+            04_tcl/**
+            05_rollbacks/**
+            **.sql
+ 
+      - name: Validate syntax of changed files
+        if: steps.changed-files.outputs.any_changed == 'true'
+        env:
+          PGPASSWORD: ci_password
+        run: |
+          echo "SQL files to validate:"
+          echo "${{ steps.changed-files.outputs.all_changed_files }}"
+ 
+          for file in ${{ steps.changed-files.outputs.all_changed_files }}; do
+            echo "→ Validating: $file"
+            psql -h localhost -U ci_user -d ci_db \
+              -c "BEGIN; \i $file; ROLLBACK;" \
+              || { echo "ERROR in $file"; exit 1; }
+          done
+ 
+          echo "All scripts passed syntax validation."
+ 
+  summary:
+    name: Validation summary
+    runs-on: ubuntu-latest
+    needs: [lint-sql, syntax-check]
+    if: always()
+ 
+    steps:
+      - name: Report result
+        run: |
+          if [ "${{ needs.lint-sql.result }}" = "success" ] && \
+             [ "${{ needs.syntax-check.result }}" = "success" ]; then
+            echo "✅ All checks passed. Ready for review."
+          else
+            echo "❌ One or more checks failed. Review the errors above."
+            exit 1
+          fi
